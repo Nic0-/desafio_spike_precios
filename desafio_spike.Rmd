@@ -1,0 +1,343 @@
+---
+title: "Desafio Spike"
+author: "Nicolás Sandoval"
+date: "05-08-2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(magrittr)) install.packages("magrittr", repos = "http://cran.us.r-project.org")
+if(!require(patchwork)) install.packages("patchwork", repos = "http://cran.us.r-project.org")
+if(!require(tidymodels)) install.packages("tidymodels", repos = "http://cran.us.r-project.org")
+
+```
+
+1. Datos: Precipitaciones, Indicadores Económicos Banco Central
+• Cargar archivo precipitaciones.csv con las precipitaciones medias mensuales
+registradas entre enero 1979 y abril 2020. (Unidad: mm).
+
+```{r, carga de datos precipitaciones}
+rain=read_csv("precipitaciones.csv")
+visdat::vis_dat(rain)
+```
+Después de cargar los datos de precipitaciones podemos ver que no hay valores faltantes y todas las columnas fueron importadas como `double`, excepto la columna de fecha.También podemos ver que los datos se encuentran en un formato ancho, con cada fila teniendo más de una observación, lo que no es ideal para trabajar con las herramientas de tidyverse.
+
+```{r, transformacion a formato tidy}
+#rain%<>%mutate(date=as_datetime(date))
+rain_long=rain%>%pivot_longer(!date,names_to = "region", values_to = "mm")
+```
+
+Con los datos transformados, podemos fácilmente visualizar las distribuciones, que parecen no tener irregularidades.
+```{r distribuciones}
+rain_long%>%ggplot(aes(mm))+geom_density()+facet_wrap(~region)
+```
+
+Un potencial problema para trabajar con los datos es que las observaciones son mensuales, pero están asignadas temporalmente a un solo día del mes, por lo que es útil crear columnas adicionales de año y mes, que faciliten agrupar los datos sin información diaria.
+
+
+```{r, carga de datos Precipitaciones}
+rain_long%<>%mutate(mes=month(date), anio=year(date), fecha=as_datetime(date))
+p1=rain_long%>%
+  filter(region=="Biobio")%>%ggplot(aes(date,mm))+geom_line()+labs(title = "Serie de tiempo con fechas diarias")
+p2=rain_long%>%
+  filter(region=="Biobio")%>%ggplot(aes(mes,mm))+geom_line()+facet_wrap(~anio)+labs(title = "Usando mes y año")
+p1+p2
+rain_long%>%filter(region=="Biobio")%>%ggplot(aes(mm, color=region, ))+geom_density()
+```
+
+• Cargar archivo banco_central.csv con variables económicas.
+```{r, carga de datos Banco Central}
+banco=read_csv("banco_central.csv")
+visdat::vis_dat(banco)
+
+```
+El archivo contiene 85 columnas, de las cuales solo un pequeño grupo fue importado como número y gran parte de la base contiene NAs.
+
+```{r}
+banco%>%select_if(is.numeric)%>%colnames()
+```
+Solo las columnas con información de dólares y la de venta de autos fueron leídas como información numérica.
+Mirando los datos, podemos ver que el resto de las columnas con números, tienen puntos como separador de miles y por eso se interpretaron como caracteres.
+Podemos crear una función auxiliar que transforme a númerico, asumiendo que si hay comas dentro de las columnas, estas corresponden a decimales.
+```{r, limpieza Banco Central}
+parse_num=function(x){
+    parse_number(x,locale =locale(decimal_mark = ","))
+}
+```
+
+Antes de aplicar esta función es importante convertir la columna `Periodo` en fecha, para facilitar la aplicación al resto de la base usando `mutate_if`.
+
+```{r, limpieza Banco Central 2}
+procesamiento=function(datos_banco){
+  datos_banco%>%mutate(fecha=as_datetime(Periodo))%>%
+  mutate_if(is.character,parse_num)
+}
+
+banco_proc=procesamiento(banco)
+visdat::vis_dat(banco_proc)
+```
+Al aplicar estas transformaciones hay varios datos que entregan errores. El primero está en la columna de fecha (2020-13-01 00:00:00 UTC), donde el mes es 13. Viendo los datos, diciembre de 2020 no se encuentra en la base, por lo que esta columna podría corresponder a ese mes.
+Los demás errores están asociados a valores con la letra `a` donde debería haber un NA o un número, sin embargo, parecen simplemente ser errores por lo que se removieron de la base.
+
+```{r, limpieza Banco Central 3}
+banco_proc%<>%mutate(fecha=replace_na(fecha, as_datetime("2020-12-01 00:00:00 UTC")))
+```
+Después de estas correcciones podemos remover duplicados y ordenar los datos por fecha, para ver si hay alguna relación entre los datos faltantes y la fecha, por ejemplo, que alguna variable solo se haya empezado a recolectar después de cierto año.
+
+```{r, limpieza Banco Central 4}
+banco_proc%<>%
+  distinct()%>%
+  arrange(fecha)
+visdat::vis_dat(banco_proc)
+```
+Como se puede ver, ninguna variable tiene valores faltantes después de que aparece el primer valor, a excepción de los últimos meses que se encuentran incompletos, probablemente porque no se había reportado el valor cuando se construyó la base. En este paso además se eliminan las filas duplicadas.
+Habiendo completado esto, podemos investigar si los valores dentro de las columnas tienen sentido.
+
+```{r, limpieza Banco Central 5}
+p1=banco_proc%>%ggplot(aes(fecha, Imacec_industria))+geom_point()+labs(title="Imacec industria por fecha")
+p2=banco_proc%>%ggplot(aes(Imacec_industria))+geom_density()+labs(title="Distribución de valores de Imacec industria")
+p1/p2
+```
+Tomando una de las variables de Imacec, podemos ver que la distribución es bimodal, lo que usualmente indica algún error.
+Además los datos parecieran estar separados en varios niveles que cubren un rango muy amplio de valores y el Imacec se suele reportar como variación porcentual, así que los datos deberían rondar cerca del 0 en vez de llegar a varios millones.
+
+```{r, limpieza Banco Central 6}
+imacec_long=banco_proc%>%select(fecha, contains("imacec"))%>%
+  pivot_longer(!fecha, names_to = "Tipo", values_to = "Imacec")
+```
+Si pasamos los datos de Imacec a un nuevo dataframe ordenado, podemos visualizar si esto ocurre en todas las variables.
+Dado el amplio rango de valores, es más fácil ver diferencias en escala logarítmica.
+
+```{r, limpieza Banco Central 7}
+imacec_long%>%na.omit()%>%
+  ggplot(aes(x=fecha, y=Imacec))+geom_point()+scale_y_log10()+facet_wrap(~Tipo)
+```
+Se pueden apreciar al menos 4 "niveles" en los datos, cuando debería haber solo 1.
+
+```{r, limpieza Banco Central 8}
+imacec_long%>%
+  ggplot(aes(Imacec))+geom_density()+facet_wrap(~Tipo)
+
+imacec_long%<>%na.omit()
+max(imacec_long$Imacec)
+
+correccion=function(imacec){
+  corte1=10^8.5
+  corte2=10^7.5
+  corte3=10^6.5
+  case_when(imacec>=corte1~imacec/(corte1*10^0.5),
+            imacec>=corte2~imacec/(corte2*10^0.5),
+            imacec>=corte3~imacec/(corte3*10^0.5),
+            TRUE~imacec/1000000)
+}
+imacec_long%>%
+  ggplot(aes(fecha,correccion(Imacec)))+geom_point()+facet_wrap(~Tipo)
+timetk::tk_anomaly_diagnostics(imacec_long, fecha, Imacec)
+imacec_long%>%group_by(Tipo)%>%timetk::plot_anomaly_diagnostics(fecha, Imacec)
+```
+No es posible asegurar que los valores sean correctos, pero al menos ahora todos están en el mismo orden de magnitud y parecen tener una tendencia estable. Otra opción hubiera sido indentificar y remover outliers, aunque dada las distribuciones de los datos, se perdería gran parte de la información.
+
+Siguiendo el análisis con los datos del PIB.
+```{r}
+pib_long=banco_proc%>%select(fecha, contains("PIB"))%>%
+  pivot_longer(!fecha, names_to = "Tipo", values_to = "PIB")%>%na.omit()
+pib_long%>%
+  ggplot(aes(x=fecha, y=PIB))+geom_point()+scale_y_log10()+facet_wrap(~Tipo)
+pib_long%>%
+  ggplot(aes(log(PIB+1)))+geom_density()+facet_wrap(~Tipo,scales = "free")
+pib_long%>%
+  ggplot(aes(PIB))+geom_density()+facet_wrap(~Tipo)
+pib_long%>%
+  ggplot(aes(Tipo, log(PIB+1)))+geom_boxplot()
+
+correccion_pib=function(pib){
+  corte1=10^7.5
+  corte2=10^6.5
+  corte3=10^6.5
+
+  case_when(pib>=corte1~pib,
+            pib>=corte2~pib*10,
+            pib>=corte3~pib*1000,
+            TRUE~pib*10000)
+}
+pib_long%>%
+  ggplot(aes(fecha,correccion_pib(PIB)))+geom_point()+facet_wrap(~Tipo)+scale_y_log10()
+```
+Nuevamente nos encontramos con una cantidad importante de valores que parecen ser outliers, sin embargo, al revisar las distribuciones, no son una proporción importante y podemos filtrar usando la desviación estándar de cada variable, descartando valores que estén a más de 2 SDs de la media.
+```{r}
+resumen_pib=pib_long%>%group_by(Tipo)%>%summarize(mu=mean(PIB), med=median(PIB), s_dev=sd(PIB))
+pib_clean=pib_long%>%left_join(resumen_pib, by="Tipo")%>%
+  mutate(PIB=ifelse(
+    PIB>(mu+2*s_dev)|PIB<(mu-2*s_dev), NA, PIB
+  ))%>%distinct()
+pib_clean2=pib_long%>%left_join(resumen_pib, by="Tipo")%>%
+  mutate(PIB=ifelse(
+    PIB>(med+2*s_dev)|PIB<(med-2*s_dev), NA, PIB
+  ))%>%distinct()
+
+pib_clean%>%
+  ggplot(aes(log(PIB+1)))+geom_density()+facet_wrap(~Tipo,scales = "free")
+pib_clean2%>%
+  ggplot(aes(log(PIB+1)))+geom_density()+facet_wrap(~Tipo,scales = "free")
+```
+
+
+
+2. Análisis de datos. Creación de variables
+• Realiza un análisis exploratorio de la base de datos, ¿Qué puedes decir de los datos,
+sus distribuciones, valores faltantes, otros? ¿Hay algo que te llame la atención?
+• Realiza una limpieza de datos para que las series de tiempo no tengan duplicados ni
+valores incorrectos.
+
+3. Visualización
+• Crea una función que permita graficar series históricas de precipitaciones para un
+rango de fechas determinado. Para esto la función debe recibir como argumentos el
+nombre de una región, fecha de inicio y fecha de término (asegúrate de verificar en
+tu función que tanto el nombre de la región como las fechas ingresadas existan en el
+dataset).
+```{r función de vis}
+vis_lluvia=function(fecha_inicio,fecha_termino, region_solicitada){
+  
+  rango_base=interval(min(rain_long$date), max(rain_long$date))
+  rango=interval(ymd(fecha_inicio), ymd(fecha_termino))
+  
+  if(region_solicitada%in%rain_long$region)(
+    if(rango%within%rango_base) 
+      rain_long%>%filter(date%within%rango, region==region_solicitada)%>%
+      ggplot(aes(date,mm, group=region))+geom_col()+facet_wrap(~region)
+    else "Fechas no se encuentran en la base.")
+  else "Región no se encuentra en la base"
+}
+
+```
+
+• Usa esta función para graficar las precipitaciones para la Región Libertador General
+Bernardo O'Higgins y para la Región Metropolitana entre las fechas 2000-01-01 y
+2020-01-01.
+```{r}
+p1=vis_lluvia("2000-01-01","2020-01-01", "Biobio")
+p2=vis_lluvia("2000-01-01","2020-01-01", "Metropolitana_de_Santiago")
+p1/p2
+```
+
+o ¿ Qué observas con respecto a estacionalidades y tendencias?
+• Crea una función que, para una región, grafique múltiples series de tiempo
+mensuales de precipitaciones, donde cada serie de tiempo corresponda a un año. La
+función debe recibir como argumento una lista con los años que queremos graficar
+(2000, 2005,..) y el nombre de la región. El eje X debe indicar los meses (enero,
+febrero, etc…).
+```{r}
+
+vis_lluvia2=function(lista, region_solicitada){
+  
+rain_long%>%
+    mutate(fecha_aux=as.Date(paste0("2000-",mes,"-01")))%>%
+    filter(anio%in%lista, region==region_solicitada)%>%
+    ggplot(aes(fecha_aux,mm,group=anio, color=as.factor(anio)))+
+    geom_line()+
+    labs(title = paste("Precipitaciones por año en", region_solicitada),color="Año", x="Mes")+
+        scale_x_date(date_labels = "%b", date_breaks = "1 month")+scale_color_viridis_d()
+
+}
+años=c(1982, 1992,2002,2012,2019)
+vis_lluvia2(años, "Maule")
+
+```
+```{r}
+vis_lluvia3=function(lista, region_solicitada){
+  
+rain_long%>%
+    mutate(fecha_aux=as.Date(paste0("2000-",mes,"-01")))%>%
+    filter(anio%in%lista, region==region_solicitada)%>%
+    ggplot(aes(fecha_aux,mm))+
+    geom_line()+
+    labs(title = paste("Precipitaciones por año en", region_solicitada),color="Año", x="Mes")+
+        scale_x_date(date_labels = "%b", date_breaks = "1 month")+facet_wrap(~anio)
+
+}
+
+vis_lluvia3(años, "Maule")
+
+```
+
+• Usa esta función para graficar las precipitaciones para la Región del Maule durante
+los años 1982, 1992, 2002, 2012 y 2019.
+o ¿Qué puedes concluir de estos gráficos?
+
+
+
+• Crea una función que permita visualizar dos series históricas de PIB para un rango de
+fechas determinado. Para esto la función debe recibir como input el nombre de cada
+serie, fecha de inicio y fecha de término.
+
+```{r funcion vis PIB}
+vis_pib=function(pib1, pib2){
+  pib_clean%>%filter(Tipo==pib1|Tipo==pib2)%>%
+    ggplot(aes(fecha,PIB, color=Tipo))+geom_line()
+}
+
+vis_pib("PIB_Agropecuario_silvicola","PIB_Servicios_financieros")
+```
+
+
+• Grafica las series de tiempo del PIB agropecuario y silvícola y la del PIB de Servicios
+financieros desde el 2013-01-01 hasta la fecha más reciente en que haya datos.
+
+o ¿Qué puedes decir de cada serie en particular?
+o ¿Hay alguna relación entre estas dos series?
+
+4. Tratamiento y creación de variables
+• ¿Cómo podríamos evaluar la correlación entre las distintas series de tiempo y cómo
+se tienen que correlacionar para entrenar un modelo? ¿Mucha correlación, no
+correlacionadas, da igual?
+
+
+• Para el entrenamiento del modelo, queremos predecir el precio de la leche para el
+productor en Chile. Para eso, descarga el archivo precio_leche.csv y haz un merge con
+las bases de datos de precipitaciones y datos del Banco Central.
+```{r importar leche}
+leche=read_csv("precio_leche.csv")
+levels(as.factor(leche$Mes))
+reemplazo_mes=function(mes){
+  case_when(mes=="Abr"~"04", mes=="Ago"~"08", mes=="Dic"~"12",mes=="Ene"~"01", mes=="Feb"~"02", mes=="Jul"~"07", mes=="Jun"~"06", mes=="Mar"~"03", mes=="May"~"05", mes=="Nov"~"11", mes=="Oct"~"10" ,mes=="Sep"~"09")}
+leche%<>%mutate(mo=map_chr(Mes,reemplazo_mes),fecha=as_datetime(paste0(Anio,"-",mo,"-01")),trimestre=quarter(fecha))%>% mutate(precio_sig=lead(Precio_leche))
+
+leche%>%timetk::plot_time_series(fecha,Precio_leche)
+
+```
+
+
+*Este archivo tiene una columna de año, mes y precio_leche (que corresponde al
+precio nominal, sin IVA, en pesos chilenos por litro), por lo que vas a tener que crear
+la columna de fecha que calce con la de las otras bases.
+• Crea las variables:
+o A partir de la variable fecha, crea nuevas variables para el año, mes, trimestre.
+o Lags y estadísticas acumuladas (por ejemplo: promedio, varianza) de las
+variables que consideres relevantes.
+5. Modelo
+
+```{r}
+base_combinada=leche%>%
+  left_join(imacec_long, by="fecha")%>%
+  left_join(pib_long, by="fecha")%>%
+  left_join(rain_long, by="fecha")%>%
+  select(-mo,-anio)
+
+leche_rec=recipe(precio_sig~.)+step_date()
+```
+
+• Entrena un modelo que permita predecir el precio de la leche el próximo mes, en
+función de los datos entregados.
+o Si necesitas crear variables adicionales que pueden aportar información al
+modelo, tienes total libertad.
+• Construye una base de test (o de cross validation). ¿Cuál fue tu definición de
+tiempo/cantidad de datos para este set de datos? Explica por qué la elegiste así.
+• ¿Qué datos adicionales te gustaría tener?¿Qué datos son necesarios para que este
+modelo funcione/mejore las métricas?
+• ¿Cómo evalúas el resultado del modelo?¿Qué métricas tiene sentido mirar?
+• ¿Para qué aplicaciones puede servir un modelo de este tipo? En particular, ¿Cómo
+podría ayudar a combatir el cambio climático?
