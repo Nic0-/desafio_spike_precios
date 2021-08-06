@@ -374,6 +374,7 @@ cor_matrix= train_set%>%
 corr_var(cor_matrix,precio_sig, top=20)
 corr_var(cor_matrix,imacec_industria, top=20)
 corr_var(cor_matrix,pib_mineria, top=20)
+corr_var(cor_matrix,mm_total, top=20)
 
 ```
 
@@ -429,13 +430,11 @@ lm_fit=lm_wflow %>%
   finalize_workflow(select_best(lm_tune)) %>%
   fit(train_set)
 
-lm_fit%>%augment(test_set) %>%
-  yardstick::rmse(precio_sig, .pred)
 ```
 
-El mejor resultado se obtuvo con un lambda de regularización de 0, y el RMSE fue de 11.1.
+El mejor resultado durante el entrenamiento se obtuvo con un lambda de regularización de 0, y el RMSE fue de 5.53.
 
-Luego probamos un modelo menos interpretable (gradient boosted trees), pero que muchas veces entrega mejores resultados predictivos, sobre todo cuando hay relaciones no lineales entre variables. El RMSE obtenido fue de 16.3, algo mayor que el del modelo lineal.
+Luego probamos un modelo menos interpretable (gradient boosted trees), pero que muchas veces entrega mejores resultados predictivos, sobre todo cuando hay relaciones no lineales entre variables. 
 ```{r}
 bt_model =
   boost_tree(mode="regression",
@@ -468,15 +467,75 @@ bt_fit = bt_wflow %>%
   finalize_workflow(select_best(bt_tune)) %>%
   fit(train_set)
 
-bt_fit%>%augment(test_set) %>%
-  yardstick::rmse(precio_sig, .pred)
+
 
 ```
 
-El RMSE obtenido fue de 16.1, algo mayor que el del modelo lineal.
+El mejor RMSE obtenido durante el entrenamiento fue de 6.53, algo mejor que el del modelo lineal.
+
+
+```{r}
+lm_fit%>%augment(test_set) %>%
+  yardstick::rmse(precio_sig, .pred)
+
+bt_fit%>%augment(test_set) %>%
+  yardstick::rmse(precio_sig, .pred)
+```
+
+Respecto del desempeño de los modelos, aunque no tienen un error importante, se obtiene un RMSE de 11.1 simplemente usando como predicción el valor del mes actual, es decir, predecir que el precio de la leche no cambia de un mes a otro. Esto nos dice que los modelos no están agregando información útil, puesto que predecir persistencia tiene iguales o mejores resultados.
+
+```{r}
+yardstick::rmse(estimate=precio_leche, truth=precio_sig, data = test_set)
+```
+
+```{r}
+folds=vfold_cv(train_set)
+#sin precio
+leche_rec=recipe(precio_sig~
+                   imacec_industria+
+                   pib_mineria+
+                   pib_refinacion_de_petroleo+
+                   indice_de_produccion_industrial_electricidad_gas_y_agua+
+                   pib_alimentos+
+                   mm_total+
+                   mes,
+                 data=train_set)%>%
+  step_num2factor(mes, levels = levels(as.factor(train_set$mes)))%>%
+  step_normalize(all_numeric_predictors())%>%
+  step_dummy(all_nominal())%>%
+  step_impute_mean(all_numeric_predictors())#%>%
+ # step_interact(terms=~anio:starts_with("mes"))
+  
+summary(leche_rec)
+tidy(leche_rec)
+leche_rec%>%prep()
+
+met=metric_set(yardstick::rmse)
+grid_control=control_grid(extract=extract_model,save_pred = TRUE, save_workflow = TRUE)
+
+
+lm_model = linear_reg(penalty = tune()) %>% set_engine("glmnet")
+
+lm_wflow = 
+  workflow() %>% 
+  add_model(lm_model) %>% 
+  add_recipe(leche_rec)
+lm_tune=lm_wflow%>%  tune_grid(resamples=folds,metrics=met, grid=tibble(penalty=seq(0,10,0.5)))
+
+lm_tune%>%collect_metrics()%>%arrange(mean)
+
+autoplot(lm_tune)
+
+lm_fit=lm_wflow %>%
+  finalize_workflow(select_best(lm_tune)) %>%
+  fit(train_set)
+
+lm_fit%>%augment(test_set) %>%
+  yardstick::rmse(precio_sig, .pred)
+```
+
 
 • ¿Qué datos adicionales te gustaría tener?¿Qué datos son necesarios para que este
 modelo funcione/mejore las métricas?
-• ¿Cómo evalúas el resultado del modelo?¿Qué métricas tiene sentido mirar?
 • ¿Para qué aplicaciones puede servir un modelo de este tipo? En particular, ¿Cómo
 podría ayudar a combatir el cambio climático?
