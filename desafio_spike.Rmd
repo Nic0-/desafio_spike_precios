@@ -11,6 +11,7 @@ editor_options:
 knitr::opts_chunk$set(echo = FALSE, message = FALSE)
 if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
 if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(janitor)) install.packages("janitor", repos = "http://cran.us.r-project.org")
 if(!require(magrittr)) install.packages("magrittr", repos = "http://cran.us.r-project.org")
 if(!require(patchwork)) install.packages("patchwork", repos = "http://cran.us.r-project.org")
 if(!require(tidymodels)) install.packages("tidymodels", repos = "http://cran.us.r-project.org")
@@ -69,7 +70,7 @@ Ahora cargamos los datos del Banco Central.
 ```{r, carga de datos Banco Central}
 banco=read_csv("banco_central.csv")
 visdat::vis_dat(banco)
-
+banco%<>%clean_names()
 ```
 
 El archivo contiene 85 columnas, de las cuales solo un pequeño grupo fue importado como número y gran parte de la base contiene NAs.
@@ -95,19 +96,19 @@ Antes de aplicar esta función es importante convertir la columna `Periodo` en f
 
 ```{r, limpieza Banco Central 2}
 procesamiento=function(datos_banco){
-  datos_banco%>%mutate(fecha=as_datetime(Periodo))%>%
-  mutate_if(is.character,parse_num)%>%select(-Periodo)
+  datos_banco%>%mutate(fecha=as_datetime(periodo))%>%
+  mutate_if(is.character,parse_num)%>%select(-periodo)
 }
 
 banco_proc=procesamiento(banco)
 visdat::vis_dat(banco_proc)
 ```
 
-Al aplicar estas transformaciones hay varios datos que entregan errores. El primero está en la columna de fecha (2020-13-01 00:00:00 UTC), donde el mes es 13. Viendo los datos, diciembre de 2020 no se encuentra en la base, por lo que esta columna podría corresponder a ese mes, pero no podemos asegurarlo.
+Al aplicar estas transformaciones hay varios datos que entregan errores. El primero está en la columna de fecha (2020-13-01 00:00:00 UTC), donde el mes es 13. Viendo los datos, diciembre de 2020 no se encuentra en la base, por lo que esta columna podría corresponder a ese mes, pero no podemos asegurarlo, por lo que se removió.
 Los demás errores están asociados a valores con la letra `a` donde debería haber un NA o un número, sin embargo, parecen simplemente ser errores por lo que se removieron de la base.
 
 ```{r, limpieza Banco Central 3}
-banco_proc%<>%mutate(fecha=replace_na(fecha, as_datetime("2020-12-01 00:00:00 UTC")))
+banco_proc%<>%filter(!is.na(fecha))
 ```
 
 Después de estas correcciones podemos remover duplicados y ordenar los datos por fecha, para ver si hay alguna relación entre los datos faltantes y la fecha, por ejemplo que alguna variable solo se haya empezado a recolectar después de cierto año.
@@ -125,8 +126,8 @@ Como se puede ver, ninguna variable tiene valores faltantes después de que apar
 Habiendo completado esto, podemos investigar si los valores dentro de las columnas tienen sentido.
 
 ```{r, limpieza Banco Central 5}
-p1=banco_proc%>%ggplot(aes(fecha, Imacec_industria))+geom_point()+labs(title="Imacec industria por fecha")
-p2=banco_proc%>%ggplot(aes(Imacec_industria))+geom_density()+labs(title="Distribución de valores de Imacec industria")
+p1=banco_proc%>%ggplot(aes(fecha, imacec_industria))+geom_point()+labs(title="Imacec industria por fecha")
+p2=banco_proc%>%ggplot(aes(imacec_industria))+geom_density()+labs(title="Distribución de valores de Imacec industria")
 p1/p2
 ```
 Tomando una de las variables de Imacec, podemos ver que la distribución es bimodal, lo que usualmente indica algún error.
@@ -184,7 +185,6 @@ pib_long%>%
   ggplot(aes(log(PIB+1)))+geom_density()+facet_wrap(~Tipo,scales = "free")
 pib_long%>%
   ggplot(aes(Tipo, log(PIB+1)))+geom_boxplot()
-
 ```
 
 Nuevamente nos encontramos con una cantidad importante de valores que parecen ser outliers, sin embargo, al revisar las distribuciones, parecen ser una proporción menor que para el imacec y podemos filtrar usando la desviación estándar de cada variable, descartando valores que estén a más de 2 SDs de la media.
@@ -329,29 +329,32 @@ Dado que parte de los datos presentaban errores, el PIB de servicio financieros 
 Para determinar qué variables escoger para el modelo es importante determinar tanto qué variables tienen alta correlación con nuestra variable a predecir y también qué variables aportan información distinta al modelo. Es común tener variables de alta correlación con nuestro outcome que tienen a la vez alta correlación entre ellas. 
 
 ```{r importar leche}
-leche=read_csv("precio_leche.csv")
+leche=read_csv("precio_leche.csv")%>%clean_names()
 levels(as.factor(leche$Mes))
 reemplazo_mes=function(mes){
   case_when(mes=="Abr"~"04", mes=="Ago"~"08", mes=="Dic"~"12",mes=="Ene"~"01", mes=="Feb"~"02", mes=="Jul"~"07", mes=="Jun"~"06", mes=="Mar"~"03", mes=="May"~"05", mes=="Nov"~"11", mes=="Oct"~"10" ,mes=="Sep"~"09")}
-leche%<>%mutate(mo=map_chr(Mes,reemplazo_mes),fecha=as_datetime(paste0(Anio,"-",mo,"-01")),trimestre=quarter(fecha))%>% mutate(precio_sig=lead(Precio_leche))
+leche%<>%mutate(mes=map_chr(mes,reemplazo_mes),fecha=as_datetime(paste0(anio,"-",mes,"-01")),trimestre=quarter(fecha))%>% mutate(precio_sig=lead(precio_leche),mes=parse_number(mes))
 
 ```
 
-El siguiente paso sería corregir los precios nominales de la leche, por precios reales, de modo que sea posible comparar
+Dado que gran parte de las variables económicas no tienen datos antes de 1996, se descaron las filas previas.
 
 ```{r}
 pib_wide=pib_long%>%pivot_wider(names_from = "Tipo", values_from = "PIB")
 imacec_wide=imacec_long%>%pivot_wider(names_from = "Tipo", values_from = "Imacec")
 ind_wide=ind_long%>%na.omit()%>%pivot_wider(names_from = "Tipo", values_from = "indice")
+rain_final=rain_long%>%group_by(mes, anio)%>%
+  summarize(mm_total=sum(mm))
 
 base_combinada=leche%>%
+  left_join(rain_final, by=c("anio", "mes"))%>%
   left_join(imacec_wide, by="fecha")%>%
   left_join(pib_wide, by="fecha")%>%
- #left_join(rain_long, by="fecha")%>%
-  left_join(ind_wide, by="fecha")%>%
-  select(-mo,
-        #-anio
-        )
+  left_join(ind_wide, by="fecha")
+  
+base_combinada%<>%
+  filter(fecha>=as_datetime("1996-01-01"))
+
 #falta incluir datos de precios
 ts_split = base_combinada%>%time_series_split(date_var = fecha, assess = "365 days", cumulative = TRUE)
 split_df=ts_split %>%
@@ -361,8 +364,6 @@ split_df=ts_split %>%
 Por ejemplo, construyendo una pequeña base combinada, podemos usar la función corr_var, para ver la correlación de todas las variables contra la variable de interés (precio de la leche del mes siguiente). Esto se debe hacer después de separar nuestros datos en un set de entrenamiento y uno de prueba, para evitar influenciar la modelación con información de nuestro set de prueba. Escogí usar el último año de datos como set de prueba, para mantener la estacionalidad de los datos.
 
 ```{r}
-base_combinada%<>%
-  filter(fecha>=as_datetime("1996-01-01"))
 train_set=split_df%>%filter(.key=="training")%>%select(-.key, -.id)
 test_set=split_df%>%filter(.key=="testing")%>%select(-.key, -.id)
 
@@ -371,32 +372,35 @@ cor_matrix= train_set%>%
   na.omit()
 
 corr_var(cor_matrix,precio_sig, top=20)
+corr_var(cor_matrix,imacec_industria, top=20)
+corr_var(cor_matrix,pib_mineria, top=20)
+
 ```
 
-Después podemos revisar la correlación cruzada entre otras variables y así no incluir variables de muy alta correlación con las que ya fueron incluidas.
+Después podemos revisar la correlación entre variables predictoras y así no considerar variables de muy alta correlación con las que ya fueron incluidas.
+
+Un ejemplo claro de variables correlacionadas son las temporales, los trimestres siempre están asociados a los mismos meses, por lo que incluir ambas como predictores probablemente no va a ser mejor que incluir solo una. Varias variables económicas también tiene alta correlación, como el Imacec empalmado y el Imacec a costo de factores (cor=0.997).
 
 ```{r}
 corr_cross(cor_matrix, max_pvalue = 0.05,top = 30)
 ```
 
-Un ejemplo claro de variables correlacionadas son las temporales, los trimestres siempre están asociados a los mismos meses, por lo que incluir ambas como predictores probablemente no va a ser mejor que incluir solo una.
-
-
 ## Modelos
 
-lineal
-rmse 15.1
+El primer modelo a considerar es uno de regresión lineal regularizada, y la penalización se calibró usando cross-validation (k=10).
+Para medir el desempeño se seleccionó el RMSE, de modo que tanto sobreestimar como subestimar el precio tenga el mismo peso. Además esta medida nos entrega el error en las mismas unidades que la predicción.
 
 ```{r}
 folds=vfold_cv(train_set)
 
 leche_rec=recipe(precio_sig~
-                   Precio_leche+
-                   Imacec_industria+
-                   PIB_Refinacion_de_petroleo+
-                   Imacec_no_minero+
-                   Indice_de_produccion_industrial_electricidad__gas_y_agua+
-                   PIB_Industria_Manufacturera,
+                   precio_leche+
+                   imacec_industria+
+                   pib_mineria+
+                   pib_refinacion_de_petroleo+
+                   indice_de_produccion_industrial_electricidad_gas_y_agua+
+                   pib_alimentos+
+                   mm_total,
                  data=train_set)%>%
   step_normalize(all_numeric_predictors())%>%
   step_dummy(all_nominal())%>%
@@ -428,10 +432,10 @@ lm_fit=lm_wflow %>%
 lm_fit%>%augment(test_set) %>%
   yardstick::rmse(precio_sig, .pred)
 ```
-gradient boosted trees 
-rmse 54.1
 
+El mejor resultado se obtuvo con un lambda de regularización de 0, y el RMSE fue de 11.1.
 
+Luego probamos un modelo menos interpretable (gradient boosted trees), pero que muchas veces entrega mejores resultados predictivos, sobre todo cuando hay relaciones no lineales entre variables. El RMSE obtenido fue de 16.3, algo mayor que el del modelo lineal.
 ```{r}
 bt_model =
   boost_tree(mode="regression",
@@ -451,7 +455,7 @@ bt_tune = bt_wflow %>%
   tune_grid(folds,
             metrics = met,
             control = grid_control,
-            grid =crossing(mtry = c(4,7),
+            grid =crossing(mtry = c(4,6),
                             trees = seq(200,1200, 100), learn_rate=c(0.01)))
 
 autoplot(bt_tune)
@@ -469,6 +473,7 @@ bt_fit%>%augment(test_set) %>%
 
 ```
 
+El RMSE obtenido fue de 16.1, algo mayor que el del modelo lineal.
 
 • ¿Qué datos adicionales te gustaría tener?¿Qué datos son necesarios para que este
 modelo funcione/mejore las métricas?
