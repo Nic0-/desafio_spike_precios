@@ -14,6 +14,9 @@ if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-
 if(!require(magrittr)) install.packages("magrittr", repos = "http://cran.us.r-project.org")
 if(!require(patchwork)) install.packages("patchwork", repos = "http://cran.us.r-project.org")
 if(!require(tidymodels)) install.packages("tidymodels", repos = "http://cran.us.r-project.org")
+if(!require(lares)) install.packages("lares", repos = "http://cran.us.r-project.org")
+if(!require(modeltime)) install.packages("modeltime", repos = "http://cran.us.r-project.org")
+if(!require(timetk)) install.packages("timetk", repos = "http://cran.us.r-project.org")
 
 ```
 
@@ -203,6 +206,35 @@ pib_clean2%>%
   ggplot(aes(log(PIB+1)))+geom_density()+facet_wrap(~Tipo,scales = "free")
 ```
 
+Revisamos las columnas de índices.
+
+```{r}
+ind_long=banco_proc%>%select(fecha, contains("indice"))%>%
+  pivot_longer(!fecha, names_to = "Tipo", values_to = "indice")
+```
+
+```{r}
+
+ind_long%>%na.omit()%>%
+  ggplot(aes(x=fecha, y=indice))+geom_point()+scale_y_log10()+facet_wrap(~Tipo)
+```
+
+Podemos ver que ocurre lo mismo que en el Imacec, con los datos separados en varios niveles a diferentes órdendes de magnitud.
+
+```{r}
+correccion2=function(indice){
+  corte1=10^8.3
+  corte2=10^7.3
+  corte3=10^6.3
+  case_when(indice>=corte1~indice/(corte1*10^0.7),
+            indice>=corte2~indice/(corte2*10^0.7),
+            indice>=corte3~indice/(corte3*10^0.7),
+            TRUE~indice/1000000)
+}
+ind_long%>%na.omit()%>%
+  ggplot(aes(x=fecha, y=correccion2(indice)))+geom_point()+scale_y_log10()+facet_wrap(~Tipo)
+ind_long%<>%mutate(indice=correccion2(indice))
+```
 
 ## Visualización
 
@@ -288,19 +320,11 @@ vis_pib("PIB_Agropecuario_silvicola","PIB_Servicios_financieros")
 ```
 
 
-Dado que parte de los datos presentaban errores, el PIB de servicio financieros se ve incompleto, aunque siempre al alza, mientras que el agropecuario tiene estacionalidad y sin una tendencia clara al alza.
-o ¿Qué puedes decir de cada serie en particular?
-o ¿Hay alguna relación entre estas dos series?
+Dado que parte de los datos presentaban errores, el PIB de servicio financieros se ve incompleto, aunque siempre al alza, mientras que el agropecuario tiene estacionalidad y sin una tendencia clara al alza. No parece haber una relación entre ambas series.
 
-4. Tratamiento y creación de variables
-• ¿Cómo podríamos evaluar la correlación entre las distintas series de tiempo y cómo
-se tienen que correlacionar para entrenar un modelo? ¿Mucha correlación, no
-correlacionadas, da igual?
+### Tratamiento y creación de variables
+Para determinar qué variables escoger para el modelo es importante determinar tanto qué variables tienen alta correlación con nuestra variable a predecir y también qué variables aportan información distinta al modelo. Es común tener variables de alta correlación con nuestro outcome que tienen a la vez alta correlación entre ellas. 
 
-
-• Para el entrenamiento del modelo, queremos predecir el precio de la leche para el
-productor en Chile. Para eso, descarga el archivo precio_leche.csv y haz un merge con
-las bases de datos de precipitaciones y datos del Banco Central.
 ```{r importar leche}
 leche=read_csv("precio_leche.csv")
 levels(as.factor(leche$Mes))
@@ -308,36 +332,51 @@ reemplazo_mes=function(mes){
   case_when(mes=="Abr"~"04", mes=="Ago"~"08", mes=="Dic"~"12",mes=="Ene"~"01", mes=="Feb"~"02", mes=="Jul"~"07", mes=="Jun"~"06", mes=="Mar"~"03", mes=="May"~"05", mes=="Nov"~"11", mes=="Oct"~"10" ,mes=="Sep"~"09")}
 leche%<>%mutate(mo=map_chr(Mes,reemplazo_mes),fecha=as_datetime(paste0(Anio,"-",mo,"-01")),trimestre=quarter(fecha))%>% mutate(precio_sig=lead(Precio_leche))
 
-leche%>%timetk::plot_time_series(fecha,Precio_leche)
 
 ```
-
-
-*Este archivo tiene una columna de año, mes y precio_leche (que corresponde al
-precio nominal, sin IVA, en pesos chilenos por litro), por lo que vas a tener que crear
-la columna de fecha que calce con la de las otras bases.
-• Crea las variables:
-o A partir de la variable fecha, crea nuevas variables para el año, mes, trimestre.
-o Lags y estadísticas acumuladas (por ejemplo: promedio, varianza) de las
-variables que consideres relevantes.
-5. Modelo
 
 ```{r}
-base_combinada=leche%>%
-  left_join(imacec_long, by="fecha")%>%
-  left_join(pib_long, by="fecha")%>%
-  left_join(rain_long, by="fecha")%>%
-  select(-mo,-anio)
+pib_wide=pib_long%>%pivot_wider(names_from = "Tipo", values_from = "PIB")
+imacec_wide=imacec_long%>%pivot_wider(names_from = "Tipo", values_from = "Imacec")
+ind_wide=ind_long%>%na.omit()%>%pivot_wider(names_from = "Tipo", values_from = "indice")
 
-leche_rec=recipe(precio_sig~., data=base_combinada)
+base_combinada=leche%>%
+  left_join(imacec_wide, by="fecha")%>%
+  left_join(pib_wide, by="fecha")%>%
+  left_join(rain_long, by="fecha")%>%
+  left_join(ind_long, by="fecha")%>%
+  select(-mo,-anio)
+#falta incluir datos de indices y precios
+ts_split = base_combinada%>%time_series_split(date_var = fecha, assess = "365 days", cumulative = TRUE)
+split_df=ts_split %>%
+  tk_time_series_cv_plan()
 ```
 
-• Entrena un modelo que permita predecir el precio de la leche el próximo mes, en
-función de los datos entregados.
-o Si necesitas crear variables adicionales que pueden aportar información al
-modelo, tienes total libertad.
-• Construye una base de test (o de cross validation). ¿Cuál fue tu definición de
-tiempo/cantidad de datos para este set de datos? Explica por qué la elegiste así.
+Por ejemplo, construyendo una pequeña base combinada, podemos usar la función corr_var, para ver la correlación de todas las variables contra la variable de interés (precio de la leche del mes siguiente). Esto se debe hacer después de separar nuestros datos en un set de entrenamiento y uno de prueba, para evitar influenciar la modelación con información de nuestro set de prueba. Escogí usar el último año de datos como set de prueba, para mantener la estacionalidad de los datos.
+```{r}
+
+cor_matrix= split_df%>%filter(.key=="training")%>%
+  dplyr::select(where(is.numeric)) %>% 
+  na.omit()
+
+corr_var(cor_matrix,precio_sig, top=20)
+```
+
+Después podemos revisar la correlación cruzada entre otras variables y así no incluir variables de muy alta correlación con las que ya fueron incluidas.
+
+```{r}
+corr_cross(cor_matrix, max_pvalue = 0.05,top = 10)
+```
+
+
+## Modelo
+
+
+```{r}
+leche_rec=recipe(precio_sig~., data=base_combinada)
+
+```
+
 • ¿Qué datos adicionales te gustaría tener?¿Qué datos son necesarios para que este
 modelo funcione/mejore las métricas?
 • ¿Cómo evalúas el resultado del modelo?¿Qué métricas tiene sentido mirar?
